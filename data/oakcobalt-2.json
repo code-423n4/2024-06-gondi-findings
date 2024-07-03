@@ -1,0 +1,8 @@
+{
+  "contest": 394,
+  "handle": "oakcobalt",
+  "risk": "2",
+  "title": "Delegations cannot be removed in some cases due to vulnerable revokeDelegate() implementation",
+  "issueId": 2,
+  "issueUrl": "https://github.com/code-423n4/2024-06-gondi-findings/issues/2"
+}
