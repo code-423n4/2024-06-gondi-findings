@@ -1,0 +1,8 @@
+{
+  "contest": 394,
+  "handle": "oakcobalt",
+  "risk": "2",
+  "title": "Loan offer might be evaluated based on stale prices due to vulnerable outdated data check, risks of malicious borrow exploits",
+  "issueId": 8,
+  "issueUrl": "https://github.com/code-423n4/2024-06-gondi-findings/issues/8"
+}
