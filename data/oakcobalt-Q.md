@@ -205,13 +205,236 @@ Recommendations:
 1. In UpdateLiquidationContract(), consider adding a check that the existing liquidator’s token balance is 0, with no outstanding auction.
 2. Only update liquidationContract when there are no liquidatable loans.
 
+### Low-10: Unnecessary code - BytesLib methods are not used in this contract or its parent contracts.
+**Instances(1)**
+BytesLib methods are not used in PurchaseBundler.sol or its parent contracts.
+```solidity
+//src/lib/callbacks/PurchaseBundler.sol
+    using BytesLib for bytes;
+...
+```
+(https://github.com/code-423n4/2024-06-gondi/blob/ab1411814ca9323c5d427739f5771d3907dbea31/src/lib/callbacks/PurchaseBundler.sol#L24)
+
+Recommendations:
+Consider removing this line.
+
+### Low-11: Some proposed callers might not be confirmed
+**Instances(1)**
+LoanManagerParameterSetter.sol has a two-step process of adding callers. The issue is `addCallers()` doesn't check whether _callers.length == proposedCallers.length. If _callers.length < proposedCaller.length, some proposedCallers' indexes will not run in the for-loop. proposedCallers whose indexes are after callers will not be added as callers.
+```solidity
+//src/lib/loans/LoanManagerParameterSetter.sol
+    function addCallers(ILoanManager.ProposedCaller[] calldata _callers) external onlyOwner {
+        if (getProposedAcceptedCallersSetTime + UPDATE_WAITING_TIME > block.timestamp) {
+            revert TooSoonError();
+        }
+        ILoanManager.ProposedCaller[] memory proposedCallers = getProposedAcceptedCallers;
+        uint256 totalCallers = _callers.length;
+|>      for (uint256 i = 0; i < totalCallers;) {
+            ILoanManager.ProposedCaller calldata caller = _callers[i];
+            if (
+                proposedCallers[i].caller != caller.caller || proposedCallers[i].isLoanContract != caller.isLoanContract
+            ) {
+                revert InvalidInputError();
+            }
+
+            unchecked {
+                ++i;
+            }
+        }
+        ILoanManager(getLoanManager).addCallers(_callers);
+    }
+```
+(https://github.com/code-423n4/2024-06-gondi/blob/ab1411814ca9323c5d427739f5771d3907dbea31/src/lib/loans/LoanManagerParameterSetter.sol#L110)
+
+Recommendations:
+Add check to ensure `_callers.length == proposedCallers.length`.
 
 
+### Low-12: Incorrect comments
+**Instances(2)**
+(1) Auction Loan liquidator -> User Vault
+```solidity
+/// @title Auction Loan Liquidator
+/// @author Florida St
+/// @notice NFTs that represent bundles.
+contract UserVault is ERC721, ERC721TokenReceiver, IUserVault, Owned {
+...
+```
+(https://github.com/code-423n4/2024-06-gondi/blob/ab1411814ca9323c5d427739f5771d3907dbea31/src/lib/UserVault.sol#L13)
+(2) address(0) = ETH -> address(0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE) = ETH
+```solidity
+    /// @notice ERC20 balances for a given vault: token => (vaultId => amount). address(0) = ETH
+    mapping(address token => mapping(uint256 vaultId => uint256 amount)) _vaultERC20s;
+```
+(https://github.com/code-423n4/2024-06-gondi/blob/ab1411814ca9323c5d427739f5771d3907dbea31/src/lib/UserVault.sol#L33)
 
+Recommendations:
+Correct comments
 
+### Low-13: vaultID’s NFT/ERC20 bundle can be modified while the loan is outstanding
+**Instances(1)**
+UserVault.sol allows a user to bundle assets(NFT/ERC20) together in a vault to be used as a collateral NFT. 
 
+According to [doc](https://app.gitbook.com/o/4HJV0LcOOnJ7AVJ77p8e/s/W2WSJrV6PSLWo4p8vIGq/vaults), the intended behavior is `new NFTs cannot be added to the vault unless borrower burn the vault and create a new vaultId with a new bundle of asset`.
 
+This is not currently the case in UserVault.sol. Anyone can deposit ERC20 or ERC721 to an existing vaultID at any time. Although this doesn’t decrease assets from the vault, this may increase VaultID assets at any time during lender offer signing, loan outstanding, and loan liquidation auction process. 
+```solidity
+    function depositERC721(uint256 _vaultId, address _collection, uint256 _tokenId) external {
+        _vaultExists(_vaultId);
 
+        if (!_collectionManager.isWhitelisted(_collection)) {
+            revert CollectionNotWhitelistedError();
+        }
+        _depositERC721(msg.sender, _vaultId, _collection, _tokenId);
+    }
 
+    function _depositERC721(address _depositor, uint256 _vaultId, address _collection, uint256 _tokenId) private {
+        ERC721(_collection).transferFrom(_depositor, address(this), _tokenId);
+
+        _vaultERC721s[_collection][_tokenId] = _vaultId;
+
+        emit ERC721Deposited(_vaultId, _collection, _tokenId);
+    }
+```
+(https://github.com/code-423n4/2024-06-gondi/blob/ab1411814ca9323c5d427739f5771d3907dbea31/src/lib/UserVault.sol#L152-L158)
+
+Increasing the assets of a vaultId doesn’t put a loan’s collateralization at risk. However, this may create inconsistencies in lender offers due to vaultId ‘s changing asset bundle. 
+
+Due to the permissionless deposit process of UserVault.sol, this may also allow a malicious actor to deposit assets to a vaultID during auciton to manipulate bidding.
+
+Recommendations:
+If the intention is to disallow adding new NFTs to a vault before burning of vaultId, consider a two-step deposit and vault mint process, caller deposit assets to a new vaultId first before minting the vaultId. And disallow deposit to a vaultId after minting.
+
+### Low-14: OraclePoolOfferHandler::validateOffer allows borrowers to game spot aprPremium movement to get lower apr
+**Instances(1)**
+In OraclePoolOfferHandler.sol, aprPremium is partially based on current pool utilization (totalOutstanding / totalAssets). 
+
+In OraclePoolOfferHandler::validateOffer, aprPremium will not re-calculate unless min time interval (`getAprUpdateTolerance`) has passed. At the same time, anyone can call `setAprPremium()` to update aprPremium instantly.
+```solidity
+    function setAprPremium() external {
+|>      uint128 aprPremium = _calculateAprPremium();
+        getAprPremium = AprPremium(aprPremium, uint128(block.timestamp));
+
+        emit AprPremiumSet(aprPremium);
+    }
+
+    function validateOffer(uint256 _baseRate, bytes calldata _offer)
+        external
+        view
+        override
+        returns (uint256, uint256)
+    {
+        AprPremium memory aprPremium = getAprPremium;
+        uint256 aprPremiumValue =
+|>          (block.timestamp - aprPremium.updatedTs > getAprUpdateTolerance) ? _calculateAprPremium() : aprPremium.value;
+...
+```
+(https://github.com/code-423n4/2024-06-gondi/blob/ab1411814ca9323c5d427739f5771d3907dbea31/src/lib/pools/OraclePoolOfferHandler.sol#L193)
+
+This allows the attack vector of a borrower game spot aprPremium change due to pool activities to get lower apr.
+(1)
+A borrower can back-run a large principal repay with `setAprPremium()` call before taking out a loan(`emitLoan()`). This allows the borrower get a lower apr taking advantage of a sudden drop in utilization ratio.
+(2)
+A borrower can also front-run a large principal borrow with `setAprPremium()` call and back-run the borrow with `emitLoan()`. This ensures the spiked utilization in the pool will not increase aprPremium at the time `emitLoan()` tx settles.
+
+Recommendations:
+Consider updating aprPremium atomically in validateOffer.
+
+### Low-15: Current `afterCallerAdded()` hook will approve caller `type(uint256).max` regardless of whether the caller is a liquidator or a loan contract.
+**Instances(1)**
+In src/lib/pools/Pool.sol, accepted callers can be either a loan contract or a liquidator. Currently `afterCallerAdded()` will approve `type(uint256).max` assets to both a loan or liquidator contract. This is unnecessary since a liquidator contract doesn't pull assets from the pool.
+
+```solidity
+//src/lib/pools/Pool.sol
+    function addCallers(ProposedCaller[] calldata _callers) external {
+        if (msg.sender != getParameterSetter) {
+            revert InvalidCallerError();
+        }
+        uint256 totalCallers = _callers.length;
+        for (uint256 i = 0; i < totalCallers;) {
+            ProposedCaller calldata caller = _callers[i];
+            _acceptedCallers.add(caller.caller);
+            _isLoanContract[caller.caller] = caller.isLoanContract;
+
+|>          afterCallerAdded(caller.caller);
+            unchecked {
+                ++i;
+            }
+        }
+
+        emit CallersAdded(_callers);
+    }
+
+    function afterCallerAdded(address _caller) internal override {
+        asset.approve(_caller, type(uint256).max);
+    }
+```
+(https://github.com/code-423n4/2024-06-gondi/blob/ab1411814ca9323c5d427739f5771d3907dbea31/src/lib/loans/LoanManager.sol#L66)
+
+Recommendations:
+Consider only approve type(uint256).max for loan contracts.
+
+### Low-16: Unused library import.
+**Instances(1)**
+FixedPointMathLib is imported in ERC4626.sol but no longer used.
+```solidity
+//src/lib/pools/ERC4626.sol
+|> import {FixedPointMathLib} from "@solmate/utils/FixedPointMathLib.sol";
+
+/// @notice Fork from Solmate (https://github.com/transmissions11/solmate/blob/main/src/tokens/ERC4626.sol)
+///        to allow extra decimals.
+/// @author Solmate (https://github.com/transmissions11/solmate/blob/main/src/tokens/ERC4626.sol)
+abstract contract ERC4626 is ERC20 {
+    using Math for uint256;
+    using SafeTransferLib for ERC20;
+    using FixedPointMathLib for uint256; //@audit Low: Unused library import. Remove unused library.
+...
+```
+(https://github.com/code-423n4/2024-06-gondi/blob/ab1411814ca9323c5d427739f5771d3907dbea31/src/lib/pools/ERC4626.sol#L7)
+
+Recommendations:
+Remove unused library.
+
+### Low-17: Unused constant declaration
+**Instances(1)**
+`_PRINCIPAL_PRECISION` is not used in LidoEthBaseInterestAllocator.sol.
+```solidity
+//src/lib/pools/LidoEthBaseInterestAllocator.sol
+
+    uint256 private constant _PRINCIPAL_PRECISION = 1e20;
+
+```
+(https://github.com/code-423n4/2024-06-gondi/blob/ab1411814ca9323c5d427739f5771d3907dbea31/src/lib/pools/LidoEthBaseInterestAllocator.sol#L29)
+
+Recommendations:
+Remove `_PRINCIPAL_PRECISION`.
+
+### Low-18: In edge cases, LidoEthBaseInterestAllocator's aprBps might be updated to 0.
+**Instances(1)**
+In LidoEthBaseInterestAllocator.sol, `getBaseAprWithUpdate()` checks at least minimal time (getLidoUpdateTolerance) has passed before revising aprBps.
+
+However, there is no garuantee rebasing will occur before `getLidoUpdateTolerance`.  If rebasing didn’t occur before `getLidoUpdateTolerance`, shareRate might not change. In `_updateLidoValues()`, _lidoData.aprBos will be set to 0, which is an invalid value.
+
+```solidity
+    function getBaseAprWithUpdate() external returns (uint256) {
+        LidoData memory lidoData = getLidoData;
+|>      if (block.timestamp - lidoData.lastTs > getLidoUpdateTolerance) {
+            _updateLidoValues(lidoData);
+        }
+...
+
+    function _updateLidoValues(LidoData memory _lidoData) private {
+        uint256 shareRate = _currentShareRate();
+|>      _lidoData.aprBps = uint16(
+            _BPS * _SECONDS_PER_YEAR * (shareRate - _lidoData.shareRate) / _lidoData.shareRate
+                / (block.timestamp - _lidoData.lastTs)
+        );
+...
+
+```
+(https://github.com/code-423n4/2024-06-gondi/blob/ab1411814ca9323c5d427739f5771d3907dbea31/src/lib/pools/LidoEthBaseInterestAllocator.sol#L163)
+
+Recommendations:
+In _updateLidoValues(), consider adding a check to ensure shareRate > _lidoData.shareRate before calculating the new aprBps.
 
 
